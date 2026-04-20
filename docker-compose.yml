@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    # Runtime secrets (gitignored). Not baked into the image — see root .dockerignore.
+    env_file:
+      - backend/.env
+    # Ollama on the host: set LLM_BASE_URL=http://host.docker.internal:11434 in backend/.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "3003:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_AUTH_ENABLED=${NEXT_PUBLIC_AUTH_ENABLED:-false}
+      - NEXTAUTH_URL=http://localhost:3003
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET:-secret_placeholder_for_dev}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+    depends_on:
+      - backend

@@ -1,0 +1,27 @@
+[project]
+name = "jdalign-backend"
+version = "0.1.0"
+description = "JDAlign API and LangGraph resume auditor"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4",
+    "fastapi",
+    "gunicorn",
+    "langchain",
+    "langchain-community",
+    "langchain-litellm",
+    "langchain-openai",
+    "langgraph",
+    "langsmith",
+    "litellm",
+    "pydantic",
+    "PyPDF2",
+    "python-docx",
+    "python-dotenv",
+    "python-multipart",
+    "requests",
+    "uvicorn",
+]
+
+[tool.uv]
+package = false
