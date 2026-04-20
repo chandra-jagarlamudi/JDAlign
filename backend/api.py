@@ -26,8 +26,9 @@ app.add_middleware(
 )
 
 LABEL_CRITIC = "--- CRITIC: Identifying gaps ---"
-LABEL_WRITER = "--- WRITER: Rewriting bullets ---"
+LABEL_WRITER = "--- WRITER: Documenting Gaps ---"
 LABEL_AUDITOR = "--- AUDITOR: Validating content ---"
+LABEL_RECONSTRUCTOR = "--- RECONSTRUCTOR: Finalizing full resume ---"
 
 
 class AuditResponse(BaseModel):
@@ -35,6 +36,9 @@ class AuditResponse(BaseModel):
     draft_bullets: list[str]
     audit_feedback: str
     iteration_count: int
+    thread_id: str | None = None
+    status: str | None = "completed"
+    full_resume: str | None = None
 
 
 # Initialize Engine
@@ -77,6 +81,7 @@ async def _build_initial_state(
         "draft_bullets": [],
         "audit_feedback": None,
         "iteration_count": 0,
+        "user_approved": None,
     }
 
 
@@ -84,16 +89,29 @@ def _emit_ndjson(obj: dict[str, Any]) -> str:
     return json.dumps(obj, ensure_ascii=False) + "\n"
 
 
-def _audit_stream_generator(initial_state: dict[str, Any]) -> Any:
+def _audit_stream_generator(initial_state: dict[str, Any] | None, thread_id: str) -> Any:
     """
     NDJSON stream: lines of {"type":"stage","label":...} then {"type":"result",...}.
     Stage labels match server logs (engine + conditional routing).
     """
     max_iters = int(os.getenv("MAX_ITERATIONS", 3))
-    merged: dict[str, Any] = dict(initial_state)
+    config = {"configurable": {"thread_id": thread_id}}
+    
+    # If initial_state is None, we are continuing an existing thread
+    input_data = initial_state
 
     try:
-        for chunk in engine.stream(initial_state, stream_mode="updates", version="v1"):
+        # Use stream mode to track nodes
+        merged: dict[str, Any] = {}
+        if initial_state:
+            merged.update(initial_state)
+        else:
+            # Load existing state if we are continuing
+            curr_state = engine.get_state(config)
+            if curr_state.values:
+                merged.update(curr_state.values)
+
+        for chunk in engine.stream(input_data, config, stream_mode="updates", version="v1"):
             for node_name, node_out in chunk.items():
                 if not isinstance(node_out, dict):
                     continue
@@ -120,14 +138,26 @@ def _audit_stream_generator(initial_state: dict[str, Any]) -> Any:
                                 "label": f"--- REJECTED: Re-routing to Writer (Iteration {it}) ---",
                             }
                         )
+                elif node_name == "reconstructor":
+                    yield _emit_ndjson({"type": "stage", "label": LABEL_RECONSTRUCTOR})
+
+        # Check if we stopped at an interrupt
+        state = engine.get_state(config)
+        status = "completed"
+        # In modern LangGraph, check for tasks with __interrupt__ or if next is present
+        if state.next or any(task.name == '__interrupt__' for task in state.tasks):
+            status = "waiting"
 
         yield _emit_ndjson(
             {
                 "type": "result",
-                "analysis_report": merged["analysis_report"],
-                "draft_bullets": merged["draft_bullets"],
+                "analysis_report": merged.get("analysis_report", []),
+                "draft_bullets": merged.get("draft_bullets", []),
                 "audit_feedback": merged.get("audit_feedback") or "",
-                "iteration_count": merged["iteration_count"],
+                "iteration_count": merged.get("iteration_count", 0),
+                "thread_id": thread_id,
+                "status": status,
+                "full_resume": merged.get("full_resume"),
             }
         )
     except Exception as e:
@@ -144,6 +174,8 @@ async def audit_resume_stream(
     """
     Same inputs as /audit; returns NDJSON: stage lines then a final result object.
     """
+    import uuid
+    thread_id = str(uuid.uuid4())
     try:
         initial_state = await _build_initial_state(resume_file, resume_text, jd_input)
     except HTTPException:
@@ -152,7 +184,46 @@ async def audit_resume_stream(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
     return StreamingResponse(
-        _audit_stream_generator(initial_state),
+        _audit_stream_generator(initial_state, thread_id),
+        media_type="application/x-ndjson",
+    )
+
+
+class ConfirmRequest(BaseModel):
+    thread_id: str
+    approve: bool
+
+
+@app.post("/audit/confirm")
+async def confirm_audit(request: ConfirmRequest):
+    """
+    Continues the audit after user confirms whether to rewrite or not.
+    """
+    config = {"configurable": {"thread_id": request.thread_id}}
+    
+    # Update the state with user's choice
+    engine.update_state(config, {"user_approved": request.approve})
+    
+    if not request.approve:
+        # If user rejected, we return the final result as a single-item stream
+        def _rejected_generator():
+            state = engine.get_state(config)
+            yield _emit_ndjson({
+                "type": "result",
+                "analysis_report": state.values.get("analysis_report", []),
+                "draft_bullets": state.values.get("draft_bullets", []),
+                "audit_feedback": state.values.get("audit_feedback") or "User declined full resume rewrite.",
+                "iteration_count": state.values.get("iteration_count", 0),
+                "thread_id": request.thread_id,
+                "status": "completed",
+                "full_resume": None,
+            })
+        
+        return StreamingResponse(_rejected_generator(), media_type="application/x-ndjson")
+    
+    # Continue streaming from where it left off (starts 'writer')
+    return StreamingResponse(
+        _audit_stream_generator(None, request.thread_id),
         media_type="application/x-ndjson",
     )
 

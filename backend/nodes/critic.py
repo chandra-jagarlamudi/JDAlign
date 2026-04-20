@@ -31,4 +31,8 @@ def critic_node(state: GraphState) -> GraphState:
     content = response.content
     gaps = [line.strip("- ").strip() for line in content.split("\n") if line.strip()]
     
+    # Ensure we return a list, even if empty
+    if not isinstance(gaps, list):
+        gaps = []
+        
     return {**state, "analysis_report": gaps}
